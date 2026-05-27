@@ -1,20 +1,15 @@
 """
-run_inference.py
 
-Single entry point for the CSE 151B math reasoning competition.
-
-This file keeps the logic from the notebook:
-- Qwen/Qwen3-4B-Thinking-2507
-- vLLM with bitsandbytes quantization
-- lightweight prompt + answer-count hint
-- early-stop temperature scaling
-- final CSV with columns: id,response
-
-Default change from notebook:
+So basically rn: 
 - Temperature scaling now uses 5 temperatures.
 - First two temperatures are still 0.5 and 0.7.
 - If those agree on a nonempty boxed answer, the problem early-stops.
 - Otherwise, unresolved questions are generated at the remaining temperatures and voted.
+i asked chat to help convert the code from my notebook to the py script since piazza said
+to make it a py script. im looking over if its all correct rn and ill run it overnight to 
+see if it worked. currently ive only ran with 3 temps and it got .664 on private test 
+around 8th on leaderboard rn (took about 6 hours on a100). imma run with 5 temps and 
+hopefully itll do better since to get full points you need to be top 10 in competition.
 """
 
 from __future__ import annotations
@@ -31,8 +26,7 @@ import pandas as pd
 
 MODEL_ID = "Qwen/Qwen3-4B-Thinking-2507"
 
-# Preserves your first two early-stop temperatures and original third temperature,
-# then adds two more temperatures for unresolved questions.
+
 DEFAULT_TEMPERATURES = [0.5, 0.7, 0.9, 0.4, 0.6]
 
 SYSTEM_PROMPT_MATH = (
@@ -92,7 +86,6 @@ def extract_last_boxed(text: str) -> str:
     def extract_from_region(region: str) -> list[str]:
         entries = []
         start = 0
-
         while True:
             idx = region.find("\\boxed{", start)
             if idx == -1:
@@ -119,8 +112,6 @@ def extract_last_boxed(text: str) -> str:
         return entries
 
     entries = extract_from_region(search_text)
-
-    # Fallback: if nothing after </think>, search full text.
     if not entries:
         entries = extract_from_region(text)
 
@@ -129,8 +120,7 @@ def extract_last_boxed(text: str) -> str:
 
 def normalize_for_vote(ans: str) -> str:
     """
-    Light normalization for voting.
-    Avoids doing symbolic math; just makes identical formatting easier to match.
+    Light normalization for voting amkes identical formatting easier to match.
     """
     ans = str(ans).strip()
     ans = ans.strip("$")
@@ -141,7 +131,7 @@ def normalize_for_vote(ans: str) -> str:
 
 
 def load_jsonl(path: str | Path) -> list[dict]:
-    """Load a JSONL dataset."""
+    """Load a json dataset."""
     with open(path, "r", encoding="utf-8") as f:
         return [json.loads(line) for line in f]
 
@@ -185,8 +175,6 @@ def run_inference(
         raise ValueError("temperatures must contain at least two values for early-stop logic.")
 
     os.environ["CUDA_VISIBLE_DEVICES"] = str(gpu_id)
-
-    # Heavy imports are inside the function so CUDA_VISIBLE_DEVICES is set first.
     from transformers import AutoTokenizer
     from vllm import LLM, SamplingParams
 
@@ -256,7 +244,7 @@ def run_inference(
         outputs_by_temp[temp] = {i: response for i, response in enumerate(responses_t)}
         print(f"Done temperature={temp}")
 
-    # Early stop if first two temperatures agree on a nonempty boxed answer.
+    # early stop if first 2 temps agree on a nonempty boxed answer.
     needs_more = []
     early_results: dict[int, dict] = {}
 
@@ -348,7 +336,7 @@ def run_inference(
                 c for c in nonempty if c["norm_answer"] == winning_norm
             ]
 
-            # Same tie-break logic as the notebook: shortest response with winning answer.
+            # shortest response with winning answer.
             chosen = min(winning_candidates, key=lambda c: len(c["response"]))
         else:
             # If no candidate had a boxed answer, fallback to shortest response.
