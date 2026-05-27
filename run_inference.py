@@ -1,7 +1,8 @@
 """
 
+
 So basically rn: 
-- Temperature scaling now uses 5 temperatures.
+- temp scaling now uses 5 temperatures.
 - First two temperatures are still 0.5 and 0.7.
 - If those agree on a nonempty boxed answer, the problem early-stops.
 - Otherwise, unresolved questions are generated at the remaining temperatures and voted.
@@ -10,6 +11,16 @@ to make it a py script. im looking over if its all correct rn and ill run it ove
 see if it worked. currently ive only ran with 3 temps and it got .664 on private test 
 around 8th on leaderboard rn (took about 6 hours on a100). imma run with 5 temps and 
 hopefully itll do better since to get full points you need to be top 10 in competition.
+
+run these: pip uninstall -y vllm torch torchvision torchaudio xformers
+pip install -U uv
+uv pip install --system --no-cache vllm==0.19.1
+uv pip install --system --no-cache transformers==4.57.6 tqdm sympy numpy bitsandbytes antlr4-python3-runtime==4.11.1 accelerate
+
+then: python run_inference.py \
+  --data_path data/private.jsonl \
+  --output_csv submission.csv \
+  --debug_csv temp_scaling_debug.csv
 """
 
 from __future__ import annotations
@@ -35,7 +46,7 @@ SYSTEM_PROMPT_MATH = (
     "Put your final answer within \\boxed{}. "
     "If the problem has multiple [ANS] placeholders, give the answers in the same order, "
     "separated by commas inside a single \\boxed{}, e.g. \\boxed{3, 7}. "
-    "Do not write [ANS] in your final answer."
+    "Do not write [ANS] in your final answer. "
     "Do not round decimal answers unless the problem explicitly asks for rounding."
 )
 
@@ -74,21 +85,46 @@ def build_prompt(question: str, options: Optional[list] = None) -> tuple[str, st
 
 def extract_last_boxed(text: str) -> str:
     """
-    Extract the final boxed answer from model output.
-    Prefers content after </think>, similar to the provided judger.
-    Returns "" if no boxed answer is found.
+    Extract boxed answer similarly to the updated judger:
+    - Prefer content after the final </think>
+    - Extract the last contiguous group of \\boxed{...}
+    - If multiple final boxes are contiguous, join them with commas
+    - Fallback to searching the full text
     """
     text = str(text)
 
-    think_end = text.rfind("</think>")
-    search_text = text[think_end + len("</think>"):] if think_end >= 0 else text
+    def normalize_answer(final_answer: str) -> str:
+        special_signal_map = {
+            "\\left": "",
+            "\\right": "",
+            "∶": ":",
+            "，": ",",
+            "$": "",
+            "\\approx": "=",
+            "\\simeq": "=",
+            "\\sim": "=",
+            "^\\prime": "'",
+            "^{\\prime}": "'",
+            "^\\circ": "",
+            "%": "",
+        }
+        for signal, repl in special_signal_map.items():
+            final_answer = final_answer.replace(signal, repl)
 
-    def extract_from_region(region: str) -> list[str]:
+        final_answer = final_answer.replace("\\dfrac", "\\frac")
+        final_answer = final_answer.replace("\\tfrac", "\\frac")
+        final_answer = final_answer.strip()
+        final_answer = final_answer.strip("$")
+        final_answer = final_answer.strip()
+        return final_answer
+
+    def extract_all_boxed(region: str) -> list[tuple[int, int, str]]:
         entries = []
         start = 0
+
         while True:
             idx = region.find("\\boxed{", start)
-            if idx == -1:
+            if idx < 0:
                 break
 
             brace_start = idx + len("\\boxed{")
@@ -103,32 +139,67 @@ def extract_last_boxed(text: str) -> str:
                 i += 1
 
             if depth == 0:
-                content = region[brace_start:i - 1].strip()
+                content = region[brace_start:i - 1]
                 if content:
-                    entries.append(content)
+                    entries.append((idx, i, normalize_answer(content)))
 
             start = i
 
         return entries
 
-    entries = extract_from_region(search_text)
-    if not entries:
-        entries = extract_from_region(text)
+    def extract_final_group(region: str) -> str:
+        entries = extract_all_boxed(region)
 
-    return entries[-1].strip() if entries else ""
+        if not entries:
+            return ""
+
+        # Take last contiguous group of boxed answers.
+        last_group = [entries[-1]]
+
+        for j in range(len(entries) - 2, -1, -1):
+            gap = region[entries[j][1]:entries[j + 1][0]]
+
+            # Same spirit as updated judger:
+            # allow whitespace, commas, punctuation, $, &, and slashes between boxes.
+            if re.match(r"^[\s,\$\.\;\:\-\&\\]*$", gap):
+                last_group.insert(0, entries[j])
+            else:
+                break
+
+        return ", ".join(e[2] for e in last_group).strip()
+
+    # Prefer content after final </think>
+    think_end = text.rfind("</think>")
+    search_text = text[think_end + len("</think>"):] if think_end >= 0 else text
+
+    ans = extract_final_group(search_text)
+    if ans:
+        return ans
+
+    # Fallback: search full text
+    ans = extract_final_group(text)
+    if ans:
+        return ans
+
+    return ""
 
 
 def normalize_for_vote(ans: str) -> str:
     """
-    Light normalization for voting amkes identical formatting easier to match.
+    Light normalization for voting.
+    This does not solve math; it only makes equivalent formatting more likely to match.
     """
     ans = str(ans).strip()
     ans = ans.strip("$")
     ans = ans.replace("\\left", "").replace("\\right", "")
+    ans = ans.replace("\\dfrac", "\\frac")
+    ans = ans.replace("\\tfrac", "\\frac")
+    ans = ans.replace("\\,", "")
+    ans = ans.replace("\\;", "")
+    ans = ans.replace("\\!", "")
     ans = ans.replace(" ", "")
     ans = ans.replace("\n", "")
     return ans
-
 
 def load_jsonl(path: str | Path) -> list[dict]:
     """Load a json dataset."""
