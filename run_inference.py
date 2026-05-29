@@ -33,6 +33,7 @@ from typing import Optional
 
 import json
 import pandas as pd
+import re
 
 
 MODEL_ID = "Qwen/Qwen3-4B-Thinking-2507"
